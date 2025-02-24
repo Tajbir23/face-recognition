@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Matching with Percentage</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.3/dist/face-api.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin: 20px; }
+        .video-container { position: relative; display: inline-block; }
+        video { border: 2px solid #ddd; border-radius: 5px; }
+        canvas { position: absolute; top: 0; left: 0; }
+        #info { margin-top: 10px; font-size: 18px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>Face Matching & Details Detection</h2>
+    <input type="file" id="imageUpload" accept="image/*">
+    <div class="video-container">
+        <video id="video" width="640" height="480" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+    </div>
+    <p id="info">Upload an image to match</p>
+
+    <script>
+        let referenceFaceDescriptor = null;
+
+        async function loadModels() {
+            await faceapi.nets.tinyFaceDetector.loadFromUri('https://raw.githubusercontent.com/vladmandic/face-api/master/model/');
+            await faceapi.nets.faceLandmark68Net.loadFromUri('https://raw.githubusercontent.com/vladmandic/face-api/master/model/');
+            await faceapi.nets.faceRecognitionNet.loadFromUri('https://raw.githubusercontent.com/vladmandic/face-api/master/model/');
+            await faceapi.nets.faceExpressionNet.loadFromUri('https://raw.githubusercontent.com/vladmandic/face-api/master/model/');
+            await faceapi.nets.ageGenderNet.loadFromUri('https://raw.githubusercontent.com/vladmandic/face-api/master/model/');
+            console.log('✅ Models Loaded');
+        }
+
+        async function startCamera() {
+            let video = document.getElementById('video');
+            let stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+            video.srcObject = stream;
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => resolve();
+            });
+        }
+
+        async function detectFace() {
+            const video = document.getElementById('video');
+            await video.play();
+
+            const canvas = document.getElementById('overlay');
+            const ctx = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            const displaySize = { width: video.videoWidth, height: video.videoHeight };
+            faceapi.matchDimensions(canvas, displaySize);
+
+            setInterval(async () => {
+                const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+                    .withFaceLandmarks()
+                    .withFaceDescriptor()
+                    .withFaceExpressions()
+                    .withAgeAndGender();
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                if (detections) {
+                    faceapi.draw.drawDetections(canvas, faceapi.resizeResults([detections], displaySize));
+                    faceapi.draw.drawFaceLandmarks(canvas, faceapi.resizeResults([detections], displaySize));
+
+                    console.log(detections)
+                    const { age, gender, expressions } = detections;
+                    const dominantExpression = Object.entries(expressions).reduce((a, b) => (a[1] > b[1] ? a : b))[0];
+
+                    let matchText = "❌ No Match!";
+                    let matchPercentage = 0;
+
+                    if (referenceFaceDescriptor) {
+                        const faceMatcher = new faceapi.FaceMatcher(referenceFaceDescriptor);
+                        const bestMatch = faceMatcher.findBestMatch(detections.descriptor);
+                        matchPercentage = Math.max(0, (1 - bestMatch.distance) * 100).toFixed(2);
+                        matchText = bestMatch.distance < 0.6 ? `✅ Match: ${matchPercentage}%` : `❌ No Match (${matchPercentage}%)`;
+                    }
+
+                    document.getElementById('info').innerText = `
+                        ${matchText}
+                        Age: ${Math.round(age)}
+                        Gender: ${gender}
+                        Expression: ${dominantExpression}
+                    `;
+                } else {
+                    document.getElementById('info').innerText = "❌ No face detected in video!";
+                }
+            }, 500);
+        }
+
+        document.getElementById('imageUpload').addEventListener('change', async function(event) {
+            const imageFile = event.target.files[0];
+            if (!imageFile) return;
+
+            const img = await faceapi.bufferToImage(imageFile);
+            document.body.appendChild(img); // **Make sure image loads in the DOM before processing**
+            
+            setTimeout(async () => {
+                const detections = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+                    .withFaceLandmarks()
+                    .withFaceDescriptor();
+
+                if (detections) {
+                    referenceFaceDescriptor = new faceapi.LabeledFaceDescriptors("Uploaded Face", [detections.descriptor]);
+                    document.getElementById('info').innerText = "✅ Image uploaded! Now match with live face.";
+                    img.remove(); // Remove the image after detection
+                } else {
+                    document.getElementById('info').innerText = "❌ No face found in uploaded image!";
+                }
+            }, 1000); // **Delay to ensure image is fully loaded before processing**
+        });
+
+        async function init() {
+            await loadModels();
+            await startCamera();
+            detectFace();
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
