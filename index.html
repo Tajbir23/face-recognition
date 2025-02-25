@@ -3,129 +3,101 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Matching</title>
-    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+    <title>3D Face Detection</title>
+
+    <!-- Importing necessary libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
     <style>
-        body { text-align: center; font-family: Arial, sans-serif; }
-        #video { width: 400px; height: 300px; border: 2px solid black; }
-        #overlay { position: absolute; top: 0; left: 0; }
+        body { font-family: Arial, sans-serif; text-align: center; }
+        .video-container { position: relative; width: 640px; height: 480px; margin: auto; }
+        video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
     </style>
 </head>
 <body>
-
-    <h2>Face Recognition</h2>
-    <video id="video" autoplay></video>
-    <canvas id="overlay"></canvas>
-    <br>
-    <input type="file" id="imageUpload" accept="image/*">
-    <p id="info">Upload an image to start matching.</p>
+    <h2>3D Face Detection</h2>
+    <div class="video-container">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="face-overlay"></canvas>
+    </div>
 
     <script>
-        let referenceDescriptors = [];
-        let faceMatcher = null;
+        let faceMesh, camera, scene, renderer, camera3D, facePoints;
+        const videoWidth = 640;
+        const videoHeight = 480;
 
-        async function loadModels() {
-            const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models/';
-            await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-            await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-            await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-            console.log('✅ Models Loaded');
+        async function loadFaceMesh() {
+            faceMesh = new FaceMesh({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+            });
+
+            faceMesh.setOptions({
+                maxNumFaces: 5,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.7
+            });
+
+            faceMesh.onResults(onFaceMeshResults);
         }
 
-        async function startCamera() {
-            const video = document.getElementById('video');
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
-                video.srcObject = stream;
-                await new Promise(resolve => video.onloadedmetadata = resolve);
-                console.log('✅ Camera started');
-            } catch (error) {
-                console.error('❌ Error starting camera:', error);
-            }
+        function startCamera() {
+            const videoElement = document.getElementById('video');
+            camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await faceMesh.send({ image: videoElement });
+                },
+                width: videoWidth,
+                height: videoHeight
+            });
+            camera.start();
         }
 
-        async function detectFace() {
-            const video = document.getElementById('video');
-            await video.play();
+        function setupThreeJS() {
+            scene = new THREE.Scene();
 
-            const canvas = document.getElementById('overlay');
-            const ctx = canvas.getContext('2d');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
+            renderer = new THREE.WebGLRenderer({ alpha: true, canvas: document.getElementById('face-overlay') });
+            renderer.setSize(videoWidth, videoHeight);
 
-            faceapi.matchDimensions(canvas, { width: video.videoWidth, height: video.videoHeight });
+            camera3D = new THREE.PerspectiveCamera(65, videoWidth / videoHeight, 0.1, 100);
+            camera3D.position.z = 2.5; // Adjusted for better face depth
 
-            setInterval(async () => {
-                const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(477 * 3), 3));
 
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            facePoints = new THREE.Points(
+                geometry,
+                new THREE.PointsMaterial({ color: 0xff0000, size: 0.03 }) // 🔴 Increased dot size for visibility
+            );
 
-                if (detections) {
-                    console.log('✅ Face detected:', detections);
-
-                    faceapi.draw.drawDetections(canvas, faceapi.resizeResults([detections], { width: video.videoWidth, height: video.videoHeight }));
-                    faceapi.draw.drawFaceLandmarks(canvas, faceapi.resizeResults([detections], { width: video.videoWidth, height: video.videoHeight }));
-
-                    let matchText = "No match detected";
-
-                    if (faceMatcher && referenceDescriptors.length > 0) {
-                        const bestMatch = faceMatcher.findBestMatch(detections.descriptor);
-                        const distance = bestMatch.distance; // 0 = perfect match, 1 = no match
-
-                        let matchPercentage = ((1 - distance) * 100).toFixed(2); // Convert distance to percentage
-                        matchPercentage = Math.max(matchPercentage, 0); // Ensure it's not negative
-
-                        console.log(`🎯 Match Found: ${matchPercentage}%`);
-                        matchText = `Match: ${matchPercentage}%`;
-                    }
-
-                    ctx.font = "20px Arial";
-                    ctx.fillStyle = "red";
-                    ctx.fillText(matchText, 20, 30);
-                } else {
-                    console.log("❌ No face detected in video frame.");
-                }
-            }, 500);
+            scene.add(facePoints);
         }
 
-        document.getElementById('imageUpload').addEventListener('change', async function(event) {
-            const imageFile = event.target.files[0];
-            if (!imageFile) return;
+        function onFaceMeshResults(results) {
+            if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
+            updateLandmarks(results.multiFaceLandmarks[0]);
+        }
 
-            console.log('📂 Image uploaded:', imageFile.name);
+        function updateLandmarks(landmarks) {
+            if (!facePoints || !facePoints.geometry) return;
+            const positions = facePoints.geometry.attributes.position.array;
 
-            const img = await faceapi.bufferToImage(imageFile);
-            document.body.appendChild(img); // Show image for debugging
+            landmarks.forEach((landmark, i) => {
+                positions[i * 3] = (landmark.x - 0.5) * 4.5; // 🎯 Adjusted scaling for perfect fit
+                positions[i * 3 + 1] = -(landmark.y - 0.5) * 3.1;
+                positions[i * 3 + 2] = -landmark.z * 3.2;
+            });
 
-            setTimeout(async () => {
-                const detections = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
-
-                if (detections) {
-                    referenceDescriptors.push(detections.descriptor);
-                    faceMatcher = new faceapi.FaceMatcher(
-                        new faceapi.LabeledFaceDescriptors("Uploaded Face", referenceDescriptors)
-                    );
-
-                    console.log("✅ Face descriptor extracted from image:", referenceDescriptors);
-                    document.getElementById('info').innerText = "✅ Image uploaded! Now match with live face.";
-
-                    img.remove(); // Remove image after detection
-                } else {
-                    document.getElementById('info').innerText = "❌ No face found in uploaded image!";
-                    console.log("❌ No face detected in uploaded image.");
-                }
-            }, 1000);
-        });
+            facePoints.geometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera3D);
+        }
 
         async function init() {
-            console.log("🚀 Initializing...");
-            await loadModels();
-            await startCamera();
-            detectFace();
+            await loadFaceMesh();
+            setupThreeJS();
+            startCamera();
         }
 
         window.onload = init;
